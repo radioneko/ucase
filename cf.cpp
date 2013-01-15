@@ -23,8 +23,10 @@ class case_mapping {
 public:
 	int first;
 	int last;
+	mutable int data_size;
+	mutable int branch_count;
 
-	case_mapping(int first, int last) : first(first), last(last) {}
+	case_mapping(int first, int last) : first(first), last(last), data_size(0), branch_count(0) {}
 	virtual ~case_mapping() {};
 
 	bool contains(const case_mapping &m) const {
@@ -62,6 +64,8 @@ public:
 		}
 		fprintf(out, "};\n");
 		fprintf(out, "\treturn ucase_%04X_%04X[%s - 0x%04X];\n", first, last, var, first);
+		data_size = cm.size() * (is_short ? 2 : 4);
+		branch_count = 0;
 	}
 };
 
@@ -85,23 +89,29 @@ protected:
 public:
 	exclusion_mapping(int first, int last, const casemap &e) : case_mapping(first, last), ex(e) {}
 	void print_ret(FILE *out, const char *var) const {
-		if (ex.size() == 1)
+		if (ex.size() == 1) {
 			fprintf(out, "\treturn %s != 0x%04X ? %s : 0x%04X;\n",
 					var, ex.begin()->first, expr(var), ex.begin()->second);
-		else {
+			branch_count = 1;
+		} else {
 			charmap c;
+			branch_count = 0;
 			for (casemap::const_iterator i = ex.begin(); i != ex.end(); ++i)
 				c.push_back(i->second);
 			xlat_mapping x(ex.begin()->first, ex.rbegin()->first, c);
-			if (ex.begin()->first > first)
+			if (ex.begin()->first > first) {
 				fprintf(out, "\tif (%s < 0x%04X) return %s;\n",
 						var, ex.begin()->first, expr(var));
+				branch_count++;
+			}
 			if (ex.rbegin()->first < last) {
 				fprintf(out, "\tif (%s > 0x%04X) return %s;\n", var, ex.rbegin()->first, expr(var));
+				branch_count++;
 				x.print_ret(out, var);
 			} else {
 				x.print_ret(out, var);
 			}
+			data_size = x.data_size;
 		}
 	}
 };
@@ -227,10 +237,12 @@ case_mapping *get_mapping(int first, int last, const charmap &m)
 			resc.insert(first + i);
 		}
 	}
-	if (setl && setl != m.size())
+	if (setl && setl != (int)m.size())
 		fprintf(stderr, "set: %04X: %d of %d\n", first, setl, (int)m.size());
-	if (resl && resl != m.size())
+	if (resl && resl != (int)m.size())
 		fprintf(stderr, "res: %04X: %d of %d\n", first, m.size() - resl, (int)m.size());
+	if (dell && dell != (int)m.size())
+		fprintf(stderr, "del: %04X: %d of %d\n", first, dell, (int)m.size());
 
 #if 1
 	if (delta_ex.empty())
@@ -286,6 +298,8 @@ public:
 	}
 
 	void dump(FILE *out) {
+		int branches = 0;
+		int data = 0;
 		std::vector<case_mapping*> m;
 		m.resize(1 << (m_tree->height + 1));
 		fprintf(out, "/* tree height is %d */\n", m_tree->height + 1);
@@ -317,10 +331,13 @@ public:
 				m[i]->print_ret(out, "c");
 				fprintf(out, "}\n");
 #endif
+				branches += m[i]->branch_count + 1;
+				data += m[i]->data_size;
 //				if (m[i]->cm.size() != m[i]->last - m[i]->first + 1)
 //					abort();
 			}
 		}
+		fprintf(out, "/* %d branches, %d cdata bytes */\n", branches, data);
 	}
 };
 
@@ -344,7 +361,7 @@ int main()
 	first = cm.begin()->first;
 	map_info mi;
 	for (casemap::const_iterator i = cm.begin(), end = cm.end(); i != end; ++i) {
-		if (i->first - last > 4) {
+		if (i->first - last > 12) {
 			if (!m.empty()) {
 				cm_data d(first, last, m);
 				mi.insert(d);
