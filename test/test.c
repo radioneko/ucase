@@ -15,7 +15,7 @@ int main(int argc, char **argv)
 	unsigned i, err = 0;
 	unsigned st[10];
 	memset(st, 0, sizeof(st));
-	for (i = 0; i < 0x10000; i++) {
+	for (i = 0; i < (unsigned)-1; i++) {
 		cmp = 0;
 		unsigned my = ucase(i);
 		unsigned icu = u_foldCase(i, U_FOLD_CASE_DEFAULT);

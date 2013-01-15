@@ -17,26 +17,6 @@ struct cm_data {
 
 	cm_data() {}
 	cm_data(int first, int last, const charmap &cm) : first(first), last(last), cm(cm) {}
-	const char *label() const {
-		static char buf[32];
-		sprintf(buf, "range_%04X_%04X", first, last);
-		return buf;
-	}
-
-	void print_ret(FILE *out, const char *var) const {
-		if (cm.size() > 1) {
-			char c = '{';
-			fprintf(out, "\tstatic const unsigned short ucase_%04X_%04X[] = ", first, last);
-			for (unsigned i = 0; i < cm.size(); i++) {
-				fprintf(out, "%c0x%04X", c, cm[i]);
-				c = ',';
-			}
-			fprintf(out, "};\n");
-			fprintf(out, "\treturn ucase_%04X_%04X[%s - 0x%04X];\n", first, last, var, first);
-		} else {
-			fprintf(out, "\treturn 0x%04X;\n", cm[0]);
-		}
-	}
 };
 
 class case_mapping {
@@ -66,9 +46,17 @@ public:
 	xlat_mapping(int first, int last, const charmap &cm) : case_mapping(first, last), cm(cm) {}
 
 	void print_ret(FILE *out, const char *var) const {
+		unsigned i;
+		bool is_short = true;
 		char c = '{';
-		fprintf(out, "\tstatic const unsigned short ucase_%04X_%04X[] = ", first, last);
-		for (unsigned i = 0; i < cm.size(); i++) {
+		for (i = 0; i < cm.size(); i++) {
+			if (cm[i] > 0xffff) {
+				is_short = false;
+				break;
+			}
+		}
+		fprintf(out, "\tstatic const unsigned%s ucase_%04X_%04X[] = ", is_short ? " short" : "", first, last);
+		for (i = 0; i < cm.size(); i++) {
 			fprintf(out, "%c0x%04X", c, cm[i]);
 			c = ',';
 		}
@@ -169,30 +157,31 @@ public:
 static bool
 make_sequental(casemap &m, int (*cm)(int c, int arg), int arg)
 {
-	int last, brk = 0;
+	int brk = 0;
 	if (m.empty())
 		return false;
-	casemap::const_iterator i = m.begin();
-	last = i->first;
-	while (++i != m.end()) {
-		if (i->first != last + 1)
-			brk++;
-		last++;
-	}
-	if (brk > 2)
-		return false;
-	while (brk) {
+	do {
+		int last;
+		brk = 0;
+		casemap::const_iterator i = m.begin();
+		last = i->first;
+		while (++i != m.end()) {
+			if (i->first != last + 1)
+				brk++;
+			last++;
+		}
+		if (brk > 4)
+			return false;
 		i = m.begin();
 		last = i->first;
 		while (++i != m.end()) {
 			if (i->first != last + 1) {
 				m[last + 1] = cm(last + 1, arg);
-				brk--;
 				break;
 			}
 			last++;
 		}
-	}
+	} while (brk);
 	return true;
 }
 
@@ -222,10 +211,10 @@ case_mapping *get_mapping(int first, int last, const charmap &m)
 		} else {
 			dell++;
 		}
-		if (first == 0x1c4) {
+/*		if (first == 0x1c4) {
 			fprintf(stderr, "%04X => %04X %s\n", first + i, m[i],
 					((first + i) | 1) != m[i] ? "!!!" : "");
-		}
+		}*/
 		if (((first + i) | 1) == m[i]) {
 			setl++;
 			setc.insert(first + i);
@@ -299,6 +288,7 @@ public:
 	void dump(FILE *out) {
 		std::vector<case_mapping*> m;
 		m.resize(1 << (m_tree->height + 1));
+		fprintf(out, "/* tree height is %d */\n", m_tree->height + 1);
 		dump_helper(&m[0], 0, m_tree->root->right);
 		for (unsigned i = 0; i < m.size(); i++) {
 			if (m[i]) {
@@ -370,6 +360,10 @@ int main()
 		}
 		m.push_back(i->second);
 		last = i->first;
+	}
+	if (!m.empty()) {
+		cm_data d(first, last, m);
+		mi.insert(d);
 	}
 	mi.dump(stdout);
 	in = fopen("/tmp/ucd", "w");
