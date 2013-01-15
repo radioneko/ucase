@@ -90,6 +90,46 @@ public:
 	}
 };
 
+class exclusion_mapping : public case_mapping {
+	casemap ex;
+protected:
+	virtual const char *expr(const char *var) const = 0;
+public:
+	exclusion_mapping(int first, int last, const casemap &e) : case_mapping(first, last), ex(e) {}
+	void print_ret(FILE *out, const char *var) const {
+		if (ex.size() == 1)
+			fprintf(out, "\treturn %s != 0x%04X ? %s : 0x%04X;\n",
+					var, ex.begin()->first, expr(var), ex.begin()->second);
+		else {
+			charmap c;
+			for (casemap::const_iterator i = ex.begin(); i != ex.end(); ++i)
+				c.push_back(i->second);
+			xlat_mapping x(ex.begin()->first, ex.rbegin()->first, c);
+			if (ex.begin()->first > first)
+				fprintf(out, "\tif (%s < 0x%04X) return %s;\n",
+						var, ex.begin()->first, expr(var));
+			if (ex.rbegin()->first < last) {
+				fprintf(out, "\tif (%s > 0x%04X) return %s;\n", var, ex.rbegin()->first, expr(var));
+				x.print_ret(out, var);
+			} else {
+				x.print_ret(out, var);
+			}
+		}
+	}
+};
+
+class delta_ex_mapping : public exclusion_mapping {
+	int delta;
+protected:
+	const char *expr(const char *var) const {
+		static char buf[64];
+		snprintf(buf, sizeof(buf), "%s %c %d", var, delta < 0 ? '-' : '+', delta < 0 ? -delta : delta);
+		return buf;
+	}
+public:
+	delta_ex_mapping(int first, int last, const casemap &e, int delta) : exclusion_mapping(first, last, e), delta(delta) {}
+};
+
 class set_mapping : public case_mapping {
 public:
 	set_mapping(int first, int last) : case_mapping(first, last) {}
@@ -98,30 +138,15 @@ public:
 	}
 };
 
-class set_ex_mapping : public case_mapping {
-	casemap ex;
-public:
-	set_ex_mapping(int first, int last, const casemap &e) : case_mapping(first, last), ex(e) {}
-	void print_ret(FILE *out, const char *var) const {
-		if (ex.size() == 1)
-			fprintf(out, "\treturn %s != 0x%04X ? %s | 1 : 0x%04X;\n",
-					var, ex.begin()->first, var, ex.begin()->second);
-		else {
-			charmap c;
-			for (casemap::const_iterator i = ex.begin(); i != ex.end(); ++i)
-				c.push_back(i->second);
-			xlat_mapping x(ex.begin()->first, ex.rbegin()->first, c);
-			if (ex.begin()->first > first)
-				fprintf(out, "\tif (%s < 0x%04X) return %s | 1;\n",
-						var, ex.begin()->first, var);
-			if (ex.rbegin()->first < last) {
-				fprintf(out, "\tif (%s > 0x%04X) return %s | 1;\n", var, ex.rbegin()->first, var);
-				x.print_ret(out, var);
-			} else {
-				x.print_ret(out, var);
-			}
-		}
+class set_ex_mapping : public exclusion_mapping {
+protected:
+	const char *expr(const char *var) const {
+		static char buf[64];
+		snprintf(buf, sizeof(buf), "%s | 1", var);
+		return buf;
 	}
+public:
+	set_ex_mapping(int first, int last, const casemap &e) : exclusion_mapping(first, last, e) {}
 };
 
 class reset_mapping : public case_mapping {
@@ -142,7 +167,7 @@ public:
 };
 
 static bool
-make_sequental(casemap &m, int (*cm)(int c))
+make_sequental(casemap &m, int (*cm)(int c, int arg), int arg)
 {
 	int last, brk = 0;
 	if (m.empty())
@@ -161,7 +186,7 @@ make_sequental(casemap &m, int (*cm)(int c))
 		last = i->first;
 		while (++i != m.end()) {
 			if (i->first != last + 1) {
-				m[last + 1] = cm(last + 1);
+				m[last + 1] = cm(last + 1, arg);
 				brk--;
 				break;
 			}
@@ -171,25 +196,32 @@ make_sequental(casemap &m, int (*cm)(int c))
 	return true;
 }
 
-static int map_set(int c)
+static int map_set(int c, int dummy)
 {
 	return c | 1;
+}
+
+static int map_delta(int c, int delta)
+{
+	return c + delta;
 }
 
 case_mapping *get_mapping(int first, int last, const charmap &m)
 {
 	int delta;
 	int i;
-	bool dm = true;
-	int setl = 0, resl = 0;
-	casemap set_ex;
+	int setl = 0, resl = 0, dell = 0;
+	casemap set_ex, delta_ex;
 	charset setc, resc;
 	if (m.size() == 1)
 		return new single_mapping(first, m[0]);
 	delta = m[0] - first;
 	for (i = 0; i < (int)m.size(); i++) {
-		if (first + i + delta != m[i])
-			dm = false;
+		if (first + i + delta != m[i]) {
+			delta_ex[first + i] = m[i];
+		} else {
+			dell++;
+		}
 		if (first == 0x1c4) {
 			fprintf(stderr, "%04X => %04X %s\n", first + i, m[i],
 					((first + i) | 1) != m[i] ? "!!!" : "");
@@ -211,15 +243,19 @@ case_mapping *get_mapping(int first, int last, const charmap &m)
 	if (resl && resl != m.size())
 		fprintf(stderr, "res: %04X: %d of %d\n", first, m.size() - resl, (int)m.size());
 
-	if (dm)
+#if 1
+	if (delta_ex.empty())
 		return new delta_mapping(first, last, delta);
+	else if (dell + delta_ex.size() == m.size() && delta_ex.size() == 1 && dell > 4)
+		return new delta_ex_mapping(first, last, delta_ex, delta);
 	else if (setl == m.size())
 		return new set_mapping(first, last);
 	else if (!resl)
 		return new reset_mapping(first, last);
-	else if (setl + set_ex.size() == m.size() && make_sequental(set_ex, map_set))
+	else if (setl + set_ex.size() == m.size() && make_sequental(set_ex, map_set, 0))
 		return new set_ex_mapping(first, last, set_ex);
 	else
+#endif
 		return new xlat_mapping(first, last, m);
 }
 
