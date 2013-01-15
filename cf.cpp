@@ -3,9 +3,12 @@
 #include <stdio.h>
 #include "avl.h"
 #include <stdlib.h>
+#include <set>
+#include <string.h>
 
 typedef std::map<int, int> casemap;
 typedef std::vector<int> charmap;
+typedef std::set<int> charset;
 
 struct cm_data {
 	int			first;
@@ -95,6 +98,32 @@ public:
 	}
 };
 
+class set_ex_mapping : public case_mapping {
+	casemap ex;
+public:
+	set_ex_mapping(int first, int last, const casemap &e) : case_mapping(first, last), ex(e) {}
+	void print_ret(FILE *out, const char *var) const {
+		if (ex.size() == 1)
+			fprintf(out, "\treturn %s != 0x%04X ? %s | 1 : 0x%04X;\n",
+					var, ex.begin()->first, var, ex.begin()->second);
+		else {
+			charmap c;
+			for (casemap::const_iterator i = ex.begin(); i != ex.end(); ++i)
+				c.push_back(i->second);
+			xlat_mapping x(ex.begin()->first, ex.rbegin()->first, c);
+			if (ex.begin()->first > first)
+				fprintf(out, "\tif (%s < 0x%04X) return %s | 1;\n",
+						var, ex.begin()->first, var);
+			if (ex.rbegin()->first < last) {
+				fprintf(out, "\tif (%s > 0x%04X) return %s | 1;\n", var, ex.rbegin()->first, var);
+				x.print_ret(out, var);
+			} else {
+				x.print_ret(out, var);
+			}
+		}
+	}
+};
+
 class reset_mapping : public case_mapping {
 public:
 	reset_mapping(int first, int last) : case_mapping(first, last) {}
@@ -112,26 +141,70 @@ public:
 	}
 };
 
+static bool
+make_sequental(casemap &m, int (*cm)(int c))
+{
+	int last, brk = 0;
+	if (m.empty())
+		return false;
+	casemap::const_iterator i = m.begin();
+	last = i->first;
+	while (++i != m.end()) {
+		if (i->first != last + 1)
+			brk++;
+		last++;
+	}
+	if (brk > 2)
+		return false;
+	while (brk) {
+		i = m.begin();
+		last = i->first;
+		while (++i != m.end()) {
+			if (i->first != last + 1) {
+				m[last + 1] = cm(last + 1);
+				brk--;
+				break;
+			}
+			last++;
+		}
+	}
+	return true;
+}
+
+static int map_set(int c)
+{
+	return c | 1;
+}
+
 case_mapping *get_mapping(int first, int last, const charmap &m)
 {
 	int delta;
 	int i;
 	bool dm = true;
 	int setl = 0, resl = 0;
+	casemap set_ex;
+	charset setc, resc;
 	if (m.size() == 1)
 		return new single_mapping(first, m[0]);
 	delta = m[0] - first;
 	for (i = 0; i < (int)m.size(); i++) {
 		if (first + i + delta != m[i])
 			dm = false;
-		if (first == 0xa722 /*0x048A*/) {
+		if (first == 0x1c4) {
 			fprintf(stderr, "%04X => %04X %s\n", first + i, m[i],
 					((first + i) | 1) != m[i] ? "!!!" : "");
 		}
-		if (((first + i) | 1) == m[i])
+		if (((first + i) | 1) == m[i]) {
 			setl++;
-		if ((m[i] & ~1) != first + i)
+			setc.insert(first + i);
+		} else {
+			set_ex[first + i] = m[i];
+		}
+		if ((m[i] & ~1) != first + i) {
 			resl++;
+		} else {
+			resc.insert(first + i);
+		}
 	}
 	if (setl && setl != m.size())
 		fprintf(stderr, "set: %04X: %d of %d\n", first, setl, (int)m.size());
@@ -144,6 +217,8 @@ case_mapping *get_mapping(int first, int last, const charmap &m)
 		return new set_mapping(first, last);
 	else if (!resl)
 		return new reset_mapping(first, last);
+	else if (setl + set_ex.size() == m.size() && make_sequental(set_ex, map_set))
+		return new set_ex_mapping(first, last, set_ex);
 	else
 		return new xlat_mapping(first, last, m);
 }
