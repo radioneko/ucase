@@ -5,10 +5,20 @@
 #include <stdlib.h>
 #include <set>
 #include <string.h>
+#include <getopt.h>
 
 typedef std::map<int, int> casemap;
 typedef std::vector<int> charmap;
 typedef std::set<int> charset;
+
+static bool
+	allow_delta = true,
+	allow_delta_ex = true,
+	allow_set = true,
+	allow_set_ex = true,
+	allow_res = true;
+
+static int span = 12;
 
 struct cm_data {
 	int			first;
@@ -244,19 +254,17 @@ case_mapping *get_mapping(int first, int last, const charmap &m)
 	if (dell && dell != (int)m.size())
 		fprintf(stderr, "del: %04X: %d of %d\n", first, dell, (int)m.size());
 
-#if 1
-	if (delta_ex.empty())
+	if (allow_delta && delta_ex.empty())
 		return new delta_mapping(first, last, delta);
-	else if (dell + delta_ex.size() == m.size() && delta_ex.size() == 1 && dell > 4)
+	else if (allow_delta_ex && (dell + delta_ex.size() == m.size() && delta_ex.size() == 1 && dell > 4))
 		return new delta_ex_mapping(first, last, delta_ex, delta);
-	else if (setl == m.size())
+	else if (allow_set && setl == (int)m.size())
 		return new set_mapping(first, last);
-	else if (!resl)
+	else if (allow_res && !resl)
 		return new reset_mapping(first, last);
-	else if (setl + set_ex.size() == m.size() && make_sequental(set_ex, map_set, 0))
+	else if (allow_set_ex && (setl + set_ex.size() == m.size() && make_sequental(set_ex, map_set, 0)))
 		return new set_ex_mapping(first, last, set_ex);
 	else
-#endif
 		return new xlat_mapping(first, last, m);
 }
 
@@ -343,13 +351,48 @@ public:
 
 static casemap cm;
 
-int main()
+int main(int argc, char **argv)
 {
-	int last = 0, cnt = 0, first = 0;
+	int last = 0, cnt = 0, first = 0, c;
 	charmap m;
 	FILE *in;
 	char line[4096];
+
+	while (1) {
+		c = getopt(argc, argv, "l:dDsSxXyY");
+		if (c == -1)
+			break;
+		switch (c) {
+		case 'l':
+			span = atoi(optarg);
+			break;
+		case 'd':
+			allow_delta = true; break;
+		case 'D':
+			allow_delta = false; break;
+		case 's':
+			allow_set = true; break;
+		case 'S':
+			allow_set = false; break;
+		case 'x':
+			allow_delta_ex = true; break;
+		case 'X':
+			allow_delta_ex = false; break;
+		case 'y':
+			allow_set_ex = true; break;
+		case 'Y':
+			allow_set_ex = false; break;
+		default:
+			fprintf(stderr, "Invalid option: %c\n", c);
+			exit(EXIT_FAILURE);
+		}
+	}
+
 	in = fopen("CaseFolding.txt", "r");
+	if (!in) {
+		fprintf(stderr, "Can't locate CaseFolding.txt file. Exiting.\n");
+		exit(EXIT_FAILURE);
+	}
 	while ((fgets(line, sizeof(line), in))) {
 		int c1, c2;
 		char type;
@@ -361,7 +404,7 @@ int main()
 	first = cm.begin()->first;
 	map_info mi;
 	for (casemap::const_iterator i = cm.begin(), end = cm.end(); i != end; ++i) {
-		if (i->first - last > 12) {
+		if (i->first - last > span) {
 			if (!m.empty()) {
 				cm_data d(first, last, m);
 				mi.insert(d);

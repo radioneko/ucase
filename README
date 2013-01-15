@@ -1,0 +1,22 @@
+Unicode simple casefolding functions generator.
+
+Rationale: sometimes we need to perform locale-independent case insensitive string comparesion,
+but icu may seems too heavy. For this purpose this generator is written.
+
+It produces body of pure C functions that takes unsigned int "c" argument and returns
+approproate simple casefolding according to supplied CaseFolding.txt data file.
+This function is constructed from balanced binary tree with some optimizations that allowed
+to reduce data size to less than 4 kilobytes, saving cache for other important things.
+
+You can play around with parameters for cf:
+  -c NUM   maximum number of characters between discontiguous intervals to reduce height of the
+           tree and total number of branches
+  -d (-D)  (dis)allow "delta" mapping where value of resulting character calculated as "c + delta"
+  -s (-S)  (dis)allow "set" mapping where value of resulting characted calculated as "c | 1"
+  -x (-X)  (dis)allow interval analysis to detect intervals where almost all characters but few
+           may be produced as "c + delta" and use translation tables for rest characters
+  -y (-Y)  (dis)allow interval analysis to detect intervals where almost all characters but few
+           may be produced as "c | 1" and use translation tables for rest characters
+
+Resulting code is printed to stdout with some comments: tree height, total size of translation tables
+and number of branches.
