@@ -86,7 +86,7 @@ int main(int argc, char **argv)
 	struct timespec t[2];
 	unsigned ms;
 	unsigned len = 0;
-	void *in = read_file("in.dat", &len), *out[2];
+	void *in = read_file("/tmp/in.dat", &len), *out[2];
 
 	if (!len) {
 		printf("Can't open in.dat\n");

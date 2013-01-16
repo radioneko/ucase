@@ -6,10 +6,36 @@
 #include <set>
 #include <string.h>
 #include <getopt.h>
+#include <stdarg.h>
+#include <errno.h>
 
 typedef std::map<int, int> casemap;
 typedef std::vector<int> charmap;
 typedef std::set<int> charset;
+
+typedef void (*gen_res_cb)(FILE *out, const char *fmt, ...);
+
+static void
+gen_ret_cb(FILE *out, const char *fmt, ...)
+{
+	va_list ap;
+	fprintf(out, "\treturn ");
+	va_start(ap, fmt);
+	vfprintf(out, fmt, ap);
+	va_end(ap);
+	fprintf(out, ";\n");
+}
+
+static void
+gen_var_cb(FILE *out, const char *fmt, ...)
+{
+	va_list ap;
+	fprintf(out, "\t{ oc = ");
+	va_start(ap, fmt);
+	vfprintf(out, fmt, ap);
+	va_end(ap);
+	fprintf(out, "; break; }\n");
+}
 
 static bool
 	allow_delta = true,
@@ -18,7 +44,7 @@ static bool
 	allow_set_ex = true,
 	allow_res = true;
 
-static int span = 12;
+static int span = 12, spanu8 = 0;
 
 struct cm_data {
 	int			first;
@@ -49,7 +75,7 @@ public:
 		return buf;
 	}
 
-	virtual void print_ret(FILE *out, const char *var) const = 0;
+	virtual void print_ret(FILE *out, const char *var, gen_res_cb res) const = 0;
 };
 
 class xlat_mapping : public case_mapping {
@@ -57,7 +83,7 @@ class xlat_mapping : public case_mapping {
 public:
 	xlat_mapping(int first, int last, const charmap &cm) : case_mapping(first, last), cm(cm) {}
 
-	void print_ret(FILE *out, const char *var) const {
+	void print_ret(FILE *out, const char *var, gen_res_cb res) const {
 		unsigned i;
 		bool is_short = true;
 		char c = '{';
@@ -73,7 +99,7 @@ public:
 			c = ',';
 		}
 		fprintf(out, "};\n");
-		fprintf(out, "\treturn ucase_%04X_%04X[%s - 0x%04X];\n", first, last, var, first);
+		res(out, "ucase_%04X_%04X[%s - 0x%04X]", first, last, var, first);
 		data_size = cm.size() * (is_short ? 2 : 4);
 		branch_count = 0;
 	}
@@ -84,11 +110,11 @@ class delta_mapping : public case_mapping {
 public:
 	delta_mapping(int first, int last, int delta) : case_mapping(first, last), delta(delta) {}
 
-	void print_ret(FILE *out, const char *var) const {
+	void print_ret(FILE *out, const char *var, gen_res_cb res) const {
 		if (delta > 0)
-			fprintf(out, "\treturn %s + %d;\n", var, delta);
+			res(out, "%s + %d", var, delta);
 		else
-			fprintf(out, "\treturn %s - %d;\n", var, -delta);
+			res(out, "%s - %d", var, -delta);
 	}
 };
 
@@ -98,9 +124,9 @@ protected:
 	virtual const char *expr(const char *var) const = 0;
 public:
 	exclusion_mapping(int first, int last, const casemap &e) : case_mapping(first, last), ex(e) {}
-	void print_ret(FILE *out, const char *var) const {
+	void print_ret(FILE *out, const char *var, gen_res_cb res) const {
 		if (ex.size() == 1) {
-			fprintf(out, "\treturn %s != 0x%04X ? %s : 0x%04X;\n",
+			res(out, "%s != 0x%04X ? %s : 0x%04X",
 					var, ex.begin()->first, expr(var), ex.begin()->second);
 			branch_count = 1;
 		} else {
@@ -110,16 +136,19 @@ public:
 				c.push_back(i->second);
 			xlat_mapping x(ex.begin()->first, ex.rbegin()->first, c);
 			if (ex.begin()->first > first) {
-				fprintf(out, "\tif (%s < 0x%04X) return %s;\n",
-						var, ex.begin()->first, expr(var));
+				fprintf(out, "\tif (%s < 0x%04X)\n\t",
+						var, ex.begin()->first);
+				res(out, "%s", expr(var));
 				branch_count++;
 			}
 			if (ex.rbegin()->first < last) {
-				fprintf(out, "\tif (%s > 0x%04X) return %s;\n", var, ex.rbegin()->first, expr(var));
+				fprintf(out, "\tif (%s > 0x%04X)\n\t",
+					var, ex.rbegin()->first);
+				res(out, "%s", expr(var));
 				branch_count++;
-				x.print_ret(out, var);
+				x.print_ret(out, var, res);
 			} else {
-				x.print_ret(out, var);
+				x.print_ret(out, var, res);
 			}
 			data_size = x.data_size;
 		}
@@ -141,8 +170,8 @@ public:
 class set_mapping : public case_mapping {
 public:
 	set_mapping(int first, int last) : case_mapping(first, last) {}
-	void print_ret(FILE *out, const char *var) const {
-		fprintf(out, "\treturn %s | 1;\n", var);
+	void print_ret(FILE *out, const char *var, gen_res_cb res) const {
+		res(out, "%s | 1", var);
 	}
 };
 
@@ -160,8 +189,8 @@ public:
 class reset_mapping : public case_mapping {
 public:
 	reset_mapping(int first, int last) : case_mapping(first, last) {}
-	void print_ret(FILE *out, const char *var) const {
-		fprintf(out, "\treturn %s !!! 1;\n", var);
+	void print_ret(FILE *out, const char *var, gen_res_cb res) const {
+		res(out, "%s !!! 1", var);
 	}
 };
 
@@ -169,8 +198,8 @@ class single_mapping : public case_mapping {
 	int result;
 public:
 	single_mapping(int in, int out) : case_mapping(in, in), result(out) {}
-	void print_ret(FILE *out, const char *var) const {
-		fprintf(out, "\treturn 0x%04X;\n", result);
+	void print_ret(FILE *out, const char *var, gen_res_cb res) const {
+		res(out, "0x%04X", result);
 	}
 };
 
@@ -283,9 +312,16 @@ class map_info {
 			dump_helper(a, 2 * i + 2, cur->right);
 		}
 	}
+	static int free_node(void *n) {
+		delete (case_mapping*)n;
+		return 1;
+	}
 public:
 	map_info() {
 		m_tree = avl_tree_new(avl_cmp, this);
+	}
+	~map_info() {
+		avl_tree_free(m_tree, free_node);
 	}
 
 	void insert(const cm_data &d) {
@@ -305,7 +341,7 @@ public:
 		}
 	}
 
-	void dump(FILE *out) {
+	void dump(FILE *out, const char *var, gen_res_cb res) {
 		int branches = 0;
 		int data = 0;
 		std::vector<case_mapping*> m;
@@ -318,21 +354,21 @@ public:
 #if 1
 				if (i)
 					fprintf(out, "%s:\n", m[i]->label());
-				fprintf(out, "\tif (c < 0x%04X)\n", m[i]->first);
-//				fprintf(out, "\tif (c > 0x%04X)\n", m[i]->last);
+				fprintf(out, "\tif (%s < 0x%04X)\n\t", var, m[i]->first);
+//				fprintf(out, "\tif (%s > 0x%04X)\n", var, m[i]->last);
 				j = 2 * i + 1;
 				if (j < m.size() && m[j])
-					fprintf(out, "\t\tgoto %s;\n", m[j]->label());
+					fprintf(out, "\tgoto %s;\n", m[j]->label());
 				else
-					fprintf(out, "\t\treturn c;\n");
-				fprintf(out, "\tif (c > 0x%04X)\n", m[i]->last);
-//				fprintf(out, "\tif (c < 0x%04X)\n", m[i]->first);
+					res(out, "%s", var);
+				fprintf(out, "\tif (%s > 0x%04X)\n\t", var, m[i]->last);
+//				fprintf(out, "\tif (%s < 0x%04X)\n", var, m[i]->first);
 				j = 2 * i + 2;
 				if (j < m.size() && m[j])
-					fprintf(out, "\t\tgoto %s;\n", m[j]->label());
+					fprintf(out, "\tgoto %s;\n", m[j]->label());
 				else
-					fprintf(out, "\t\treturn c;\n");
-				m[i]->print_ret(out, "c");
+					res(out, "%s", var);
+				m[i]->print_ret(out, var, res);
 #else
 				/* This is "test" generator that makes sequences of "char in [first, last]" statements */
 				fprintf(out, "if (c >= 0x%04X && c <= 0x%04X) {\n", m[i]->first, m[i]->last);
@@ -349,22 +385,106 @@ public:
 	}
 };
 
+static void
+codegen(casemap::const_iterator begin, casemap::const_iterator end, FILE *out, const char *var, gen_res_cb res, unsigned sp)
+{
+	charmap m;
+	unsigned cvt = 0;
+	int last = 0, cnt = 0, first = 0;
+	map_info mi;
+	while (begin != end && begin->first == begin->second)
+		++begin;
+	while (end != begin && end->first == end->second)
+		--end;
+	if (begin == end)
+		return;
+	first = begin->first;
+	for (casemap::const_iterator i = begin; i != end; ++i) {
+		cvt++;
+		if (i->first - last > sp) {
+			if (!m.empty()) {
+				cm_data d(first, last, m);
+				mi.insert(d);
+				m.clear();
+			}
+			first = i->first;
+			cnt++;
+		} else {
+			while (last + 1 < i->first)
+				m.push_back(++last);
+		}
+		m.push_back(i->second);
+		last = i->first;
+	}
+	if (!m.empty()) {
+		cm_data d(first, last, m);
+		mi.insert(d);
+	}
+	mi.dump(out, var, res);
+	fprintf(out, "//%d case conversions\n", cvt);
+}
+
+static void
+gen_u_cvt(const casemap &cm, const char *fname)
+{
+	FILE *out = fopen(fname, "w");
+	if (!out) {
+		perror("fopen");
+		exit(EXIT_FAILURE);
+	}
+	codegen(cm.begin(), cm.end(), out, "c", gen_ret_cb, span);
+	fclose(out);
+}
+
+static void
+gen_u8_cvt(const casemap &cm, const char *ftmpl)
+{
+	static const struct {
+		unsigned	first, last;
+	} u8r[] = {
+		{0, 0x7f},
+		{0x80, 0x7ff},
+		{0x800, 0xffff},
+		{0x10000, 0x1fffff}
+	};
+	for (unsigned i = 0; i < sizeof(u8r) / sizeof(*u8r); i++) {
+		casemap::const_iterator b, e;
+		char fname[1024];
+		snprintf(fname, sizeof(fname), "%s_%04X_%04X.h", ftmpl, u8r[i].first, u8r[i].last);
+		FILE *out = fopen(fname, "w");
+		if (!out) {
+			perror("fopen");
+			exit(EXIT_FAILURE);
+		}
+		fprintf(out, "do {\n");
+		b = cm.lower_bound(u8r[i].first);
+		if (b != cm.end()) {
+			e = cm.upper_bound(u8r[i].last);
+			codegen(b, e, out, "ic", gen_var_cb, spanu8);
+		}
+		fprintf(out, "} while (0);\n");
+		fclose(out);
+	}
+}
+
 static casemap cm;
 
 int main(int argc, char **argv)
 {
-	int last = 0, cnt = 0, first = 0, c;
-	charmap m;
+	int c;
 	FILE *in;
 	char line[4096];
 
 	while (1) {
-		c = getopt(argc, argv, "l:dDsSxXyY");
+		c = getopt(argc, argv, "l:L:dDsSxXyY");
 		if (c == -1)
 			break;
 		switch (c) {
 		case 'l':
 			span = atoi(optarg);
+			break;
+		case 'L':
+			spanu8 = atoi(optarg);
 			break;
 		case 'd':
 			allow_delta = true; break;
@@ -401,39 +521,9 @@ int main(int argc, char **argv)
 		}
 	}
 	fclose(in);
-	first = cm.begin()->first;
-	map_info mi;
-	for (casemap::const_iterator i = cm.begin(), end = cm.end(); i != end; ++i) {
-		if (i->first - last > span) {
-			if (!m.empty()) {
-				cm_data d(first, last, m);
-				mi.insert(d);
-//				if (i != cm.begin())
-//					printf("%04X - %04X: %d\n", first, last, (int)m.size());
-				m.clear();
-			}
-			first = i->first;
-			cnt++;
-		} else {
-			while (last + 1 < i->first)
-				m.push_back(++last);
-		}
-		m.push_back(i->second);
-		last = i->first;
-	}
-	if (!m.empty()) {
-		cm_data d(first, last, m);
-		mi.insert(d);
-	}
-	mi.dump(stdout);
-	in = fopen("/tmp/ucd", "w");
-	for (int i = 0; i < 0x10000; i++) {
-		casemap::const_iterator k = cm.find(i);
-//		if (k != cm.end())
-//			fprintf(in, "%04X => %04X\n", i, k->second);
-		fprintf(in, "%04X => %04X\n", i, k == cm.end() ? i : k->second);
-	}
-	fclose(in);
-	printf("//%d case conversions\n", cm.size());
+	if (span)
+		gen_u_cvt(cm, "/tmp/x");
+	if (spanu8)
+		gen_u8_cvt(cm, "/tmp/u");
 	return 0;
 }
